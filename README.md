@@ -14,6 +14,31 @@ cd mimo-2api
 go build -o mimo-2api .
 ```
 
+## Docker 部署
+
+直接使用 Docker：
+
+```bash
+# 构建镜像
+docker build -t mimo-2api .
+
+# 运行容器
+docker run -d --name mimo-2api -p 8090:8090 \
+  mimo-2api \
+  -cookie 'serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx' \
+  -apikey 'your-key' \
+  -save
+```
+
+或者使用 Docker Compose：
+
+1. 编辑项目下的 `docker-compose.yml`，填入你自己的 cookie 及相关参数。
+2. 启动服务：
+
+```bash
+docker-compose up -d
+```
+
 ## 获取 Cookie
 
 1. 浏览器打开 https://aistudio.xiaomimimo.com/ 并登录小米账号

@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  mimo-2api:
+    build: .
+    image: mimo-2api
+    container_name: mimo-2api
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    command:
+      # 替换下面参数为你自己的值
+      - "-cookie"
+      - "serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx"
+      - "-apikey"
+      - "your-key"
+      - "-save"
