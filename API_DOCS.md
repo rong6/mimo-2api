@@ -127,3 +127,73 @@ data:{"content":"[DONE]"}
   "content": "用户问题 + AI回答的前段"
 }
 ```
+
+
+### 4. 申请文件上传信息 (FDS URL)
+
+`POST /open-apis/resource/upload/genFdsUploadInfo?xiaomichatbot_ph=<xiaomichatbot_ph值>`
+
+**Request Body:**
+```json
+{
+  "fileContentMd5": "md5值",
+  "fileName": "image.png"
+}
+```
+
+**Response:**
+包含小米 FDS（对象存储）预签名 URL. 你需要拿到 `uploadUrl` 后直接 `PUT` 文件二进制流到该 URL，成功后再调用解析接口注册该文件资源才能在对话中使用。
+
+```json
+{
+    "code": 0,
+    "msg": "成功",
+    "data": {
+        "resourceId": "d0eb...",
+        "resourceUrl": "https://cnbj3-fusion.fds.api.xiaomi.com/...",
+        "uploadUrl": "https://cnbj3-fusion.fds.api.xiaomi.com/....",
+        "objectName": "multimedia/..."
+    }
+}
+```
+
+### 5. 上传文件至 FDS
+
+`PUT <从 genFdsUploadInfo 获取的预签名 url>`
+
+**Headers:**
+```
+Content-Type: application/octet-stream
+Content-MD5: <md5值>
+```
+
+此阶段文件直接以二进制流存入 `Body`。
+成功后会得到 200 OK 响应，接下来需要调用解析接口注册该文件资源才能在对话中使用。
+
+### 6. 解析并注册文件
+
+上传 FDS 成功后必须调用此处向服务端绑定，才能在聊天中使用该对象。
+
+`POST /open-apis/resource/parse?xiaomichatbot_ph=<xiaomichatbot_ph值>&fileUrl=<resourceUrl>&objectName=<objectName>&model=<model>`
+
+**Request Body:**
+```json
+{}
+```
+
+**Response:**
+返回 `resourceId`（对话时通过 multiMedias 传入）及该文件预计的 `tokenUsage` 数值。
+
+```json
+{
+    "code": 0,
+    "msg": "成功",
+    "data": {
+        "id": "bf0f...",
+        "collectionName": "bf0f....",
+        "bytes": 593360,
+        "filename": "f5....",
+        "tokenUsage": 593360
+    }
+}
+```

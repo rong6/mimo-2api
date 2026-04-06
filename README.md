@@ -91,6 +91,31 @@ curl -X POST http://localhost:8090/v1/chat/completions \
 
 ### `GET /health`
 
+## 支持视觉与文件 (多模态)
+
+本接口可解析 OpenAI 兼容格式中的 `image_url` 等结构进行图像、音频和文件上传：
+- 支持 Base64 格式：`data:image/jpeg;base64,xxxxxx`
+- 支持 URL 链接：`https://example.com/image.jpg`
+
+示例 (调用多模态发送图片)：
+```bash
+curl -X POST http://localhost:8090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "mimo-v2-omni",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "请描述这张图片"},
+          {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+        ]
+      }
+    ],
+    "stream": true
+  }'
+```
+
 ## 模型
 
 | ID | 说明 |

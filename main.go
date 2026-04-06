@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -24,7 +26,7 @@ var (
 	saveConv   bool
 	mimoBase   = "https://aistudio.xiaomimimo.com"
 	httpClient *http.Client
-	cookies    []string // 多个 cookie，轮询/随机选取
+	cookies    []string // 多个 cookie，轮询随机选取
 )
 
 // ===================== OpenAI Types =====================
@@ -121,7 +123,7 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// 随机选一个 cookie
+// 随机选一个cookie
 func pickCookie() string {
 	if len(cookies) == 1 {
 		return cookies[0]
@@ -130,10 +132,17 @@ func pickCookie() string {
 	return cookies[n.Int64()]
 }
 
-func messagesToQuery(msgs []ChatMessage) string {
+func messagesToQuery(ctx context.Context, cookie string, msgs []ChatMessage, modelName string) (string, []interface{}, error) {
 	var parts []string
+	var medias []interface{}
 	for _, m := range msgs {
-		text := extractText(m.Content)
+		text, ms, err := extractContent(ctx, cookie, m.Content, modelName)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(ms) > 0 {
+			medias = append(medias, ms...)
+		}
 		switch m.Role {
 		case "system":
 			parts = append(parts, "System: "+text)
@@ -145,7 +154,218 @@ func messagesToQuery(msgs []ChatMessage) string {
 			parts = append(parts, m.Role+": "+text)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), medias, nil
+}
+
+func getMimeExt(mime string) string {
+	mapping := map[string]string{
+		"image/jpeg":      ".jpg",
+		"image/png":       ".png",
+		"image/gif":       ".gif",
+		"image/webp":      ".webp",
+		"audio/mpeg":      ".mp3",
+		"audio/wav":       ".wav",
+		"audio/webm":      ".weba",
+		"video/mp4":       ".mp4",
+		"application/pdf": ".pdf",
+		"text/plain":      ".txt",
+	}
+	if ext, ok := mapping[mime]; ok {
+		return ext
+	}
+	return ".bin"
+}
+
+func uploadMedia(ctx context.Context, cookie string, rawUrl string, mediaType string, modelName string) (interface{}, error) {
+	var data []byte
+	var ext string = ".bin"
+
+	if strings.HasPrefix(rawUrl, "data:") {
+		parts := strings.SplitN(rawUrl, ",", 2)
+		if len(parts) == 2 {
+			mimeInfo := strings.TrimPrefix(parts[0], "data:")
+			idx := strings.Index(mimeInfo, ";")
+			if idx > 0 {
+				ext = getMimeExt(mimeInfo[:idx])
+			}
+			b, err := base64.StdEncoding.DecodeString(parts[1])
+			if err != nil {
+				return nil, err
+			}
+			data = b
+		}
+	} else if strings.HasPrefix(rawUrl, "http://") || strings.HasPrefix(rawUrl, "https://") {
+		req, _ := http.NewRequestWithContext(ctx, "GET", rawUrl, nil)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		data = b
+		mimeType := resp.Header.Get("Content-Type")
+		if mimeType != "" {
+			ext = getMimeExt(strings.Split(mimeType, ";")[0])
+		}
+	}
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty media data")
+	}
+
+	hash := md5.Sum(data)
+	md5Str := hex.EncodeToString(hash[:])
+
+	// FDS requires base64 encoded MD5 for Content-MD5 header
+	// md5Base64 := base64.StdEncoding.EncodeToString(hash[:])
+
+	fileName := randHex(8) + ext
+
+	ph := extractPh(cookie)
+	apiURL := mimoBase + "/open-apis/resource/genUploadInfo?xiaomichatbot_ph=" + url.QueryEscape(ph)
+
+	reqBody, _ := json.Marshal(map[string]string{
+		"fileName":       fileName,
+		"fileContentMd5": md5Str,
+	})
+
+	ulReq, _ := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqBody))
+	ulReq.Header.Set("Content-Type", "application/json")
+	ulReq.Header.Set("Accept-Language", "system")
+	ulReq.Header.Set("x-timeZone", "Asia/Shanghai")
+	ulReq.Header.Set("Cookie", cookie)
+
+	ulResp, err := httpClient.Do(ulReq)
+	if err != nil {
+		return nil, err
+	}
+	defer ulResp.Body.Close()
+
+	if ulResp.StatusCode != 200 {
+		b, _ := io.ReadAll(ulResp.Body)
+		return nil, fmt.Errorf("genUploadInfo failed with status %d: %s", ulResp.StatusCode, string(b))
+	}
+
+	var ulData struct {
+		Code int `json:"code"`
+		Data struct {
+			ResourceId  string `json:"resourceId"`
+			ResourceUrl string `json:"resourceUrl"`
+			UploadUrl   string `json:"uploadUrl"`
+			ObjectName  string `json:"objectName"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(ulResp.Body).Decode(&ulData); err != nil {
+		return nil, err
+	}
+	if ulData.Code != 0 || ulData.Data.UploadUrl == "" {
+		return nil, fmt.Errorf("genUploadInfo failed, code: %d", ulData.Code)
+	}
+
+	putReq, _ := http.NewRequestWithContext(ctx, "PUT", ulData.Data.UploadUrl, bytes.NewReader(data))
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putReq.Header.Set("Content-MD5", md5Str)
+
+	putResp, err := httpClient.Do(putReq)
+	if err != nil {
+		return nil, err
+	}
+	defer putResp.Body.Close()
+
+	putRespBody, _ := io.ReadAll(putResp.Body)
+	if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("FDS PUT Error %d: %s", putResp.StatusCode, string(putRespBody))
+	}
+
+	// 关键节点：上传完成后请求 parse 接口
+	parseURL := mimoBase + "/open-apis/resource/parse?fileUrl=" + url.QueryEscape(ulData.Data.ResourceUrl) + "&objectName=" + url.QueryEscape(ulData.Data.ObjectName) + "&model=" + url.QueryEscape(modelName) + "&xiaomichatbot_ph=" + url.QueryEscape(ph)
+	parseReq, _ := http.NewRequestWithContext(ctx, "POST", parseURL, strings.NewReader(`{}`))
+	parseReq.Header.Set("Content-Type", "application/json")
+	parseReq.Header.Set("Cookie", cookie)
+
+	finalID := ulData.Data.ResourceId
+	tokenUsage := 0
+
+	parseResp, err := httpClient.Do(parseReq)
+	if err == nil {
+		defer parseResp.Body.Close()
+		pb, _ := io.ReadAll(parseResp.Body)
+
+		var parseData struct {
+			Code int `json:"code"`
+			Data struct {
+				Id         string `json:"id"`
+				TokenUsage int    `json:"tokenUsage"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(pb, &parseData) == nil {
+			if parseData.Data.Id != "" {
+				finalID = parseData.Data.Id
+			}
+			tokenUsage = parseData.Data.TokenUsage
+		}
+	}
+
+	mediaItem := map[string]interface{}{
+		"mediaType":          mediaType,
+		"fileUrl":            ulData.Data.ResourceUrl,
+		"compressedVideoUrl": "",
+		"audioTrackUrl":      "",
+		"name":               fileName,
+		"size":               len(data),
+		"status":             "completed",
+		"objectName":         ulData.Data.ObjectName,
+		"url":                finalID,
+		"tokenUsage":         tokenUsage,
+	}
+	return mediaItem, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func extractContent(ctx context.Context, cookie string, content interface{}, modelName string) (string, []interface{}, error) {
+	switch v := content.(type) {
+	case string:
+		return v, nil, nil
+	case []interface{}:
+		var out []string
+		var medias []interface{}
+		for _, p := range v {
+			if m, ok := p.(map[string]interface{}); ok {
+				switch m["type"] {
+				case "text":
+					out = append(out, fmt.Sprint(m["text"]))
+				case "image_url", "file_url", "video_url", "audio_url":
+					typeRef := m["type"].(string)
+					mediaType := "image"
+					if typeRef != "image_url" {
+						mediaType = strings.TrimSuffix(typeRef, "_url")
+					}
+					var urlStr string
+					if obj, _ := m[typeRef].(map[string]interface{}); obj != nil {
+						urlStr, _ = obj["url"].(string)
+					}
+					if urlStr != "" {
+						mediaItem, err := uploadMedia(ctx, cookie, urlStr, mediaType, modelName)
+						if err == nil && mediaItem != nil {
+							medias = append(medias, mediaItem)
+						}
+					}
+				}
+			}
+		}
+		return strings.Join(out, "\n"), medias, nil
+	default:
+		return fmt.Sprint(v), nil, nil
+	}
 }
 
 func extractText(content interface{}) string {
@@ -186,6 +406,12 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 
 func checkAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		log.Printf("[REQ] %s %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+		defer func() {
+			log.Printf("[RES] %s %s %s - %v", r.RemoteAddr, r.Method, r.URL.Path, time.Since(start))
+		}()
+
 		if apiKey != "" {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader != "Bearer "+apiKey {
@@ -200,14 +426,27 @@ func checkAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func handleChat(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	var req ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		http.Error(w, `{"error":{"message":"invalid json"}}`, 400)
 		return
 	}
 
-	query := messagesToQuery(req.Messages)
+	cookie := pickCookie()
+	ctx := r.Context()
+
 	mimoModel := resolveModel(req.Model)
+
+	query, medias, err := messagesToQuery(ctx, cookie, req.Messages, mimoModel)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s"}}`, err.Error()), 500)
+		return
+	}
+	if medias == nil {
+		medias = []interface{}{}
+	}
 
 	temp := 0.8
 	if req.Temperature != nil {
@@ -227,16 +466,15 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		Query:          query,
 		IsEditedQuery:  false,
 		ModelConfig: MiMoModelCfg{
-			EnableThinking:  true,
+			EnableThinking:  mimoModel != "mimo-v2-omni",
 			WebSearchStatus: "disabled",
 			Model:           mimoModel,
 			Temperature:     temp,
 			TopP:            topP,
 		},
-		MultiMedias: []interface{}{},
+		MultiMedias: medias,
 	}
 
-	cookie := pickCookie()
 	if saveConv {
 		go saveConversation(context.Background(), cookie, convID, getFirstMsg(req.Messages))
 	}
@@ -404,17 +642,46 @@ func streamChat(w http.ResponseWriter, chatID, model string, mimoReq MiMoRequest
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	curEvent := ""
+	firstLine := true
 
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// 检查是不是后端返回的非流式报错（例如 {"code":...})
+		if firstLine && strings.HasPrefix(line, "{") {
+			sendDelta(w, flusher, chatID, model, created, &ChatDelta{Content: &line}, nil)
+			firstLine = false
+			continue
+		}
+		firstLine = false
+
 		if strings.HasPrefix(line, "event:") {
 			curEvent = strings.TrimSpace(line[6:])
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") || curEvent != "message" {
+		if !strings.HasPrefix(line, "data:") {
+			continue // 忽略没用的行
+		}
+
+		raw := strings.TrimSpace(line[5:])
+
+		if curEvent == "error" {
+			// 直接把错误信息抛给客户端
+			var e struct {
+				Content string `json:"content"`
+			}
+			json.Unmarshal([]byte(raw), &e)
+			errMsg := e.Content
+			if errMsg == "" {
+				errMsg = raw
+			}
+			fullMsg := "Error: " + errMsg
+			sendDelta(w, flusher, chatID, model, created, &ChatDelta{Content: &fullMsg}, nil)
+			break
+		} else if curEvent != "" && curEvent != "message" {
 			continue
 		}
-		raw := strings.TrimSpace(line[5:])
+
 		var d struct {
 			Content string `json:"content"`
 		}
@@ -475,7 +742,7 @@ func sendDelta(w http.ResponseWriter, f http.Flusher, id, model string, ts int64
 // ===================== Main =====================
 
 func main() {
-	// 支持 -cookie, -cookie2, -cookie3, ... 的 flag
+	// 支持 -cookie, -cookie2, -cookie3, ...
 	var cookie1, cookie2, cookie3, cookie4, cookie5 string
 	flag.StringVar(&listenAddr, "listen", ":8090", "listen address")
 	flag.StringVar(&apiKey, "apikey", "", "API Key (optional)")
@@ -495,8 +762,8 @@ func main() {
 
 	if len(cookies) == 0 {
 		log.Fatal("ERROR: 至少需要一个 -cookie 参数\n" +
-			"从浏览器 DevTools → Network → 任意请求 → Headers → Cookie 复制完整值\n" +
-			"例: -cookie 'serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx'\n" +
+			"从浏览器 DevTools 的 Network 标签页中，任意请求的 Headers 中复制完整 Cookie 值\n" +
+			"例如: -cookie 'serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx'\n" +
 			"多账号负载均衡: -cookie '...' -cookie2 '...' -cookie3 '...'")
 	}
 
@@ -519,7 +786,7 @@ func main() {
 		})
 	})
 
-	log.Printf("🚀 MiMo 2API → %s", listenAddr)
+	log.Printf("🚀 MiMo 2API on %s", listenAddr)
 	log.Printf("   账号数: %d（每次请求随机选取）", len(cookies))
 	log.Printf("   GET /health  |  POST /v1/chat/completions  |  GET /v1/models")
 
