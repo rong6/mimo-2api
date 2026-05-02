@@ -24,10 +24,43 @@ var (
 	listenAddr string
 	apiKey     string
 	saveConv   bool
+	debugMode  bool
 	mimoBase   = "https://aistudio.xiaomimimo.com"
 	httpClient *http.Client
 	cookies    []string // 多个 cookie，轮询随机选取
 )
+
+// ===================== Logger =====================
+
+func logInfo(format string, a ...interface{}) {
+	log.Printf("\033[1;36m[INFO]\033[0m "+format, a...)
+}
+
+func logSuccess(format string, a ...interface{}) {
+	log.Printf("\033[1;32m[SUCCESS]\033[0m "+format, a...)
+}
+
+func logWarn(format string, a ...interface{}) {
+	log.Printf("\033[1;33m[WARN]\033[0m "+format, a...)
+}
+
+func logError(format string, a ...interface{}) {
+	log.Printf("\033[1;31m[ERROR]\033[0m "+format, a...)
+}
+
+func logDebug(format string, a ...interface{}) {
+	if debugMode {
+		log.Printf("\033[1;35m[DEBUG]\033[0m "+format, a...)
+	}
+}
+
+func logReq(method, path, ip string) {
+	log.Printf("\033[1;34m[REQ]\033[0m \033[1m%s\033[0m %s (From: %s)", method, path, ip)
+}
+
+func logRes(method, path, ip string, duration time.Duration) {
+	log.Printf("\033[1;36m[RES]\033[0m \033[1m%s\033[0m %s (From: %s) \033[1;33m[%v]\033[0m", method, path, ip, duration)
+}
 
 // ===================== OpenAI Types =====================
 
@@ -97,6 +130,8 @@ type MiMoModelCfg struct {
 }
 
 var models = []Model{
+	{ID: "mimo-v2.5-pro", Object: "model", Created: 1767239114, OwnedBy: "xiaomi"},
+	{ID: "mimo-v2.5", Object: "model", Created: 1767239114, OwnedBy: "xiaomi"},
 	{ID: "mimo-v2-flash", Object: "model", Created: 1767239114, OwnedBy: "xiaomi"},
 	{ID: "mimo-v2-pro", Object: "model", Created: 1767239114, OwnedBy: "xiaomi"},
 	{ID: "mimo-v2-omni", Object: "model", Created: 1767239114, OwnedBy: "xiaomi"},
@@ -104,6 +139,8 @@ var models = []Model{
 
 func resolveModel(name string) string {
 	m := map[string]string{
+		"mimo-v2.5-pro":        "mimo-v2.5-pro",
+		"mimo-v2.5":            "mimo-v2.5",
 		"mimo-v2-flash-studio": "mimo-v2-flash-studio",
 		"mimo-v2-flash":        "mimo-v2-flash-studio",
 		"mimo-v2-pro":          "mimo-v2-pro",
@@ -407,20 +444,22 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 func checkAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("[REQ] %s %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+		logReq(r.Method, r.URL.Path, r.RemoteAddr)
 		defer func() {
-			log.Printf("[RES] %s %s %s - %v", r.RemoteAddr, r.Method, r.URL.Path, time.Since(start))
+			logRes(r.Method, r.URL.Path, r.RemoteAddr, time.Since(start))
 		}()
 
 		if apiKey != "" {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader != "Bearer "+apiKey {
+				logDebug("Auth Failed. Expected apiKey matched, Got header: %s", authHeader)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte(`{"error":{"message":"Unauthorized"}}`))
 				return
 			}
 		}
+		logDebug("Auth Passed or apiKey not set")
 		next(w, r)
 	}
 }
@@ -437,13 +476,18 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	cookie := pickCookie()
 	ctx := r.Context()
 
+	logDebug("Selected Cookie: %s", cookie)
+
 	mimoModel := resolveModel(req.Model)
+	logDebug("Req Model: %s -> MiMo Model: %s", req.Model, mimoModel)
 
 	query, medias, err := messagesToQuery(ctx, cookie, req.Messages, mimoModel)
 	if err != nil {
+		logError("messagesToQuery Error: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":{"message":"%s"}}`, err.Error()), 500)
 		return
 	}
+	logDebug("Generated Query Length: %d, Medias Count: %d", len(query), len(medias))
 	if medias == nil {
 		medias = []interface{}{}
 	}
@@ -525,6 +569,9 @@ func callMiMo(ctx context.Context, mimoReq MiMoRequest, cookie string) (*http.Re
 	ph := extractPh(cookie)
 	apiURL := mimoBase + "/open-apis/bot/chat?xiaomichatbot_ph=" + url.QueryEscape(ph)
 
+	logDebug("callMiMo URL: %s", apiURL)
+	logDebug("callMiMo Body: %s", string(body))
+
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -534,7 +581,13 @@ func callMiMo(ctx context.Context, mimoReq MiMoRequest, cookie string) (*http.Re
 	req.Header.Set("x-timeZone", "Asia/Shanghai")
 	req.Header.Set("Cookie", cookie)
 
-	return httpClient.Do(req)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		logError("callMiMo Error: %v", err)
+	} else {
+		logDebug("callMiMo Status: %d", resp.StatusCode)
+	}
+	return resp, err
 }
 
 // ---------- sync (non-stream) ----------
@@ -747,6 +800,7 @@ func main() {
 	flag.StringVar(&listenAddr, "listen", ":8090", "listen address")
 	flag.StringVar(&apiKey, "apikey", "", "API Key (optional)")
 	flag.BoolVar(&saveConv, "save", false, "Save conversation to web history (optional)")
+	flag.BoolVar(&debugMode, "debug", false, "Enable debug logging (optional)")
 	flag.StringVar(&cookie1, "cookie", "", "完整 Cookie 字符串 (必需)")
 	flag.StringVar(&cookie2, "cookie2", "", "第2个 Cookie (可选)")
 	flag.StringVar(&cookie3, "cookie3", "", "第3个 Cookie (可选)")
@@ -761,10 +815,11 @@ func main() {
 	}
 
 	if len(cookies) == 0 {
-		log.Fatal("ERROR: 至少需要一个 -cookie 参数\n" +
-			"从浏览器 DevTools 的 Network 标签页中，任意请求的 Headers 中复制完整 Cookie 值\n" +
-			"例如: -cookie 'serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx'\n" +
-			"多账号负载均衡: -cookie '...' -cookie2 '...' -cookie3 '...'")
+		logError("至少需要一个 -cookie 参数")
+		logError("从浏览器 DevTools 的 Network 标签页中，任意请求的 Headers 中复制完整 Cookie 值")
+		logError("例如: -cookie 'serviceToken=xxx; userId=6861418446; xiaomichatbot_ph=xxx'")
+		logError("多账号负载均衡: -cookie '...' -cookie2 '...' -cookie3 '...'")
+		return
 	}
 
 	httpClient = &http.Client{Timeout: 10 * time.Minute}
@@ -786,11 +841,14 @@ func main() {
 		})
 	})
 
-	log.Printf("🚀 MiMo 2API on %s", listenAddr)
-	log.Printf("   账号数: %d（每次请求随机选取）", len(cookies))
-	log.Printf("   GET /health  |  POST /v1/chat/completions  |  GET /v1/models")
+	logSuccess("MiMo 2API Started on %s", listenAddr)
+	logInfo("账号数: %d（每次请求随机选取）", len(cookies))
+	logInfo("Endpoints: GET /health | POST /v1/chat/completions | GET /v1/models")
+	if debugMode {
+		logWarn("调试模式已开启 (-debug)，将输出详细请求日志")
+	}
 
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
-		log.Fatal(err)
+		logError("Server failed: %v", err)
 	}
 }

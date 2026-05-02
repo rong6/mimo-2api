@@ -48,6 +48,8 @@ Cookie: xiaomichatbot_ph=<xiaomichatbot_ph值>
 
 | 值 | 模型 |
 |----|------|
+| `mimo-v2.5-pro` | MiMo-V2.5-Pro（性能旗舰） |
+| `mimo-v2.5` | MiMo-V2.5（全模态理解） |
 | `mimo-v2-flash-studio` | MiMo-V2-Flash（高速推理轻量级） |
 | `mimo-v2-pro` | MiMo-V2-Pro（性能旗舰） |
 | `mimo-v2-omni` | MiMo-V2-Omni（多模态） |

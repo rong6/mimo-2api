@@ -51,8 +51,8 @@ docker-compose up -d
 # 单账号
 ./mimo-2api -cookie 'serviceToken=xxx; userId=123; xiaomichatbot_ph=xxx'
 
-# 启用 APIKey 和保存历史会话
-./mimo-2api -cookie '...' -apikey 'your-key' -save
+# 启用 APIKey、开启调试日志和保存历史会话
+./mimo-2api -cookie '...' -apikey 'your-key' -debug -save
 
 # 多账号负载均衡（每次请求随机选一个）
 ./mimo-2api \
@@ -68,6 +68,7 @@ docker-compose up -d
 | `-listen :8090` | 监听地址 |
 | `-apikey` | API Key 认证（可选） |
 | `-save` | 保存当前对话到网页端的历史记录（可选） |
+| `-debug` | 开启调试模式输出所有网络请求和代理日志详情（可选） |
 | `-cookie` | 第1个账号 Cookie（必需） |
 | `-cookie2` | 第2个账号 Cookie（可选） |
 | `-cookie3` | 第3个账号 Cookie（可选） |
@@ -120,6 +121,8 @@ curl -X POST http://localhost:8090/v1/chat/completions \
 
 | ID | 说明 |
 |------|------|
+| mimo-v2.5-pro | 开源性能旗舰模型 |
+| mimo-v2.5 | 全模态理解大模型 |
 | mimo-v2-flash | 极速推理轻量级大模型 |
 | mimo-v2-pro | 开源性能旗舰模型 |
 | mimo-v2-omni | 极速Flash版的多模态模型 |
